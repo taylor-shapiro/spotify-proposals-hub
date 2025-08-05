@@ -1,0 +1,1301 @@
+import React, { useState, useEffect } from 'react';
+import { Link, Presentation, FileText, PlusCircle, Save, XCircle, Sparkles, Mail, Tag, Share2, Copy, Target, ShoppingBag, Trash2, Lightbulb, Briefcase } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from 'firebase/firestore';
+
+// Initialize Firebase (global variables provided by the Canvas environment)
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// Pre-defined options for ad products and targeting tactics, pulled from CSVs
+const AD_PRODUCTS_OPTIONS = [
+  'Audio',
+  'Branded Playlist',
+  'HPTO (High-Impact Takeover)',
+  'Leaderboard',
+  'Overlay',
+  'Headliner',
+  'Discover Weekly',
+  'On Repeat',
+  'Release Radar',
+  'Sponsored Playlist',
+  'Sponsored Session',
+  'Video Takeover',
+  'CTA Cards',
+  'Spotify Audience Network (SPAN)',
+  'Run of Originals & Exclusives (ROE)',
+  'Title-by-Title Podcast Ads',
+  'Podcast DAI (Dynamic Ad Insertion)',
+  'Podcast SAI (Static Ad Insertion)',
+];
+
+const TARGETING_TACTICS_OPTIONS = [
+  'Age Targeting',
+  'Gender Targeting',
+  'Language Targeting',
+  'Country Targeting',
+  'State/Province Targeting',
+  'City/County Targeting',
+  'DMA Targeting',
+  'Postal Code Targeting',
+  'Connected Devices Targeting',
+  'Car Targeting',
+  'Operating System Targeting',
+  'Carrier Targeting',
+  'ISP Targeting',
+  'Daypart Targeting',
+  'Genre Targeting',
+  'Tones (Real-time Playlist)',
+  'Activities & Settings (Real-time Playlist)',
+  'Podcast Show Categories',
+  'Podcast Episode Topics',
+  'Sensitive Topics Targeting',
+  'Demographic Audiences (1P/3P)',
+  'Interest Audiences (1P/3P)',
+  'Purchase Intent Audiences (1P/3P)',
+  'Custom 1P Audiences',
+  'Custom 2P Audiences (Audience Match)',
+  'Custom 3P Audiences',
+  'Ad Engagement Audiences',
+  'Lookalike Audiences',
+];
+
+// Main App component
+const App = () => {
+  // Authentication and Firestore states
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [proposals, setProposals] = useState([]); // List of all available proposals
+  const [currentProposalId, setCurrentProposalId] = useState(null); // ID of the currently active proposal
+  const [currentProposalData, setCurrentProposalData] = useState({ // Data for the current proposal
+    clientName: 'Client Proposal Hub',
+    presenterName: 'Presented by [Your Name/Company Name]',
+    clientLogoUrl: 'https://placehold.co/120x120/1DB954/ffffff?text=Proposal',
+    mediaPlanLink: '',
+    presentationLink: '',
+    additionalLinks: '',
+    adProductsRecommended: [],
+    targetingTacticsApplied: [],
+    suggestedAdProducts: [], // New state for AI-suggested ad products
+    suggestedTargetingTactics: [], // New state for AI-suggested targeting tactics
+    goal: '', // New state for client goal
+    clientBriefingAsk: '', // New state for client briefing ask
+    proposalDescription: '',
+    generatedInsights: [],
+    generatedNextSteps: [],
+    generatedTitleSlogan: { title: '', slogan: '' },
+    draftedClientEmail: '',
+    createdAt: null, // New field for creation timestamp
+  });
+
+  // UI states
+  const [showInputModal, setShowInputModal] = useState(false);
+  const [showLLMModal, setShowLLMModal] = useState(false);
+  const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState(false); // New state for delete confirmation
+  const [isLoadingLLM, setIsLoadingLLM] = useState(false);
+  const [llmError, setLlmError] = useState('');
+  const [shareMessage, setShareMessage] = useState(''); // For share link copy message
+
+  // --- Firebase Authentication and Data Loading ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setUserId(user.uid);
+      } else {
+        // Sign in anonymously if no user is authenticated
+        try {
+          if (typeof __initial_auth_token !== 'undefined') {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+          setUserId(auth.currentUser?.uid || crypto.randomUUID()); // Fallback for anonymous
+        } catch (error) {
+          console.error("Firebase Auth Error:", error);
+          setLlmError("Failed to authenticate. Some features may not work.");
+        }
+      }
+      setIsAuthReady(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // Effect to load proposals once authentication is ready
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    const proposalsCollectionRef = collection(db, `artifacts/${appId}/public/data/proposals`);
+
+    const unsubscribe = onSnapshot(proposalsCollectionRef, (snapshot) => {
+      const fetchedProposals = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); // Sort by creation date, newest first
+
+      setProposals(fetchedProposals);
+
+      // Check URL for proposalId to load a specific one
+      const urlParams = new URLSearchParams(window.location.search);
+      const proposalIdFromUrl = urlParams.get('proposalId');
+
+      if (proposalIdFromUrl) {
+        const foundProposal = fetchedProposals.find(p => p.id === proposalIdFromUrl);
+        if (foundProposal) {
+          setCurrentProposalId(proposalIdFromUrl);
+          // Ensure new fields are initialized if not present in old data
+          setCurrentProposalData({
+            ...foundProposal,
+            adProductsRecommended: foundProposal.adProductsRecommended || [],
+            targetingTacticsApplied: foundProposal.targetingTacticsApplied || [],
+            suggestedAdProducts: foundProposal.suggestedAdProducts || [],
+            suggestedTargetingTactics: foundProposal.suggestedTargetingTactics || [],
+            goal: foundProposal.goal || '', // Initialize new field
+            clientBriefingAsk: foundProposal.clientBriefingAsk || '', // Initialize new field
+            createdAt: foundProposal.createdAt || new Date().getTime(),
+          });
+        } else {
+          console.warn(`Proposal with ID ${proposalIdFromUrl} not found. Loading default or first available.`);
+          // If URL ID not found, load first or create new
+          if (fetchedProposals.length > 0) {
+            setCurrentProposalId(fetchedProposals[0].id);
+            setCurrentProposalData({
+              ...fetchedProposals[0],
+              adProductsRecommended: fetchedProposals[0].adProductsRecommended || [],
+              targetingTacticsApplied: fetchedProposals[0].targetingTacticsApplied || [],
+              suggestedAdProducts: fetchedProposals[0].suggestedAdProducts || [],
+              suggestedTargetingTactics: fetchedProposals[0].suggestedTargetingTactics || [],
+              goal: fetchedProposals[0].goal || '',
+              clientBriefingAsk: fetchedProposals[0].clientBriefingAsk || '',
+              createdAt: fetchedProposals[0].createdAt || new Date().getTime(),
+            });
+          } else {
+            createNewProposal(); // Create a new one if none exist
+          }
+        }
+      } else if (!currentProposalId && fetchedProposals.length > 0) {
+        // If no ID in URL and no current proposal selected, load the first one
+        setCurrentProposalId(fetchedProposals[0].id);
+        setCurrentProposalData({
+          ...fetchedProposals[0],
+          adProductsRecommended: fetchedProposals[0].adProductsRecommended || [],
+          targetingTacticsApplied: fetchedProposals[0].targetingTacticsApplied || [],
+          suggestedAdProducts: fetchedProposals[0].suggestedAdProducts || [],
+          suggestedTargetingTactics: fetchedProposals[0].suggestedTargetingTactics || [],
+          goal: fetchedProposals[0].goal || '',
+          clientBriefingAsk: fetchedProposals[0].clientBriefingAsk || '',
+          createdAt: fetchedProposals[0].createdAt || new Date().getTime(),
+        });
+      } else if (!currentProposalId && fetchedProposals.length === 0) {
+        // If no proposals exist, create a new one automatically
+        createNewProposal();
+      }
+    }, (error) => {
+      console.error("Error fetching proposals:", error);
+      setLlmError("Failed to load proposals. Please check your connection.");
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, userId]); // Re-run when auth state changes
+
+  // Effect to update Firestore when currentProposalData changes
+  useEffect(() => {
+    if (!isAuthReady || !currentProposalId) return;
+
+    const saveTimeout = setTimeout(() => {
+      const proposalRef = doc(db, `artifacts/${appId}/public/data/proposals`, currentProposalId);
+      setDoc(proposalRef, currentProposalData, { merge: true })
+        .then(() => console.log("Proposal saved successfully!"))
+        .catch((error) => console.error("Error saving proposal:", error));
+    }, 500); // Debounce saving to prevent too many writes
+
+    return () => clearTimeout(saveTimeout);
+  }, [currentProposalData, currentProposalId, isAuthReady]);
+
+  // --- Proposal Management Functions ---
+  const createNewProposal = async () => {
+    if (!isAuthReady) {
+      setLlmError("Authentication not ready. Please wait.");
+      return;
+    }
+    const newProposalData = {
+      clientName: 'New Client Proposal',
+      presenterName: `Presented by ${auth.currentUser?.displayName || 'Anonymous User'}`,
+      clientLogoUrl: 'https://placehold.co/120x120/1DB954/ffffff?text=Proposal', // Default for new proposal
+      mediaPlanLink: '',
+      presentationLink: '',
+      additionalLinks: '',
+      adProductsRecommended: [],
+      targetingTacticsApplied: [],
+      suggestedAdProducts: [],
+      suggestedTargetingTactics: [],
+      goal: '', // Initialize new fields
+      clientBriefingAsk: '', // Initialize new fields
+      proposalDescription: '',
+      generatedInsights: [],
+      generatedNextSteps: [],
+      generatedTitleSlogan: { title: '', slogan: '' },
+      draftedClientEmail: '',
+      createdAt: new Date().getTime(), // Set creation timestamp
+    };
+    try {
+      const docRef = await addDoc(collection(db, `artifacts/${appId}/public/data/proposals`), newProposalData);
+      setCurrentProposalId(docRef.id);
+      setCurrentProposalData(newProposalData);
+      console.log("New proposal created with ID:", docRef.id);
+    } catch (error) {
+      console.error("Error creating new proposal:", error);
+      setLlmError("Failed to create new proposal.");
+    }
+  };
+
+  const selectProposal = (proposalId) => {
+    const selected = proposals.find(p => p.id === proposalId);
+    if (selected) {
+      setCurrentProposalId(proposalId);
+      setCurrentProposalData({
+        ...selected,
+        adProductsRecommended: selected.adProductsRecommended || [],
+        targetingTacticsApplied: selected.targetingTacticsApplied || [],
+        suggestedAdProducts: selected.suggestedAdProducts || [],
+        suggestedTargetingTactics: selected.suggestedTargetingTactics || [],
+        goal: selected.goal || '',
+        clientBriefingAsk: selected.clientBriefingAsk || '',
+        createdAt: selected.createdAt || new Date().getTime(),
+      });
+    }
+  };
+
+  const handleDeleteProposal = () => {
+    setShowDeleteConfirmModal(true);
+  };
+
+  const confirmDeleteProposal = async () => {
+    if (!currentProposalId) return;
+    setIsLoadingLLM(true); // Re-using loading state for delete operation
+    setLlmError('');
+
+    try {
+      await deleteDoc(doc(db, `artifacts/${appId}/public/data/proposals`, currentProposalId));
+      console.log(`Proposal ${currentProposalId} deleted.`);
+      
+      // After deletion, reset current proposal or load another one
+      if (proposals.length > 1) {
+        const remainingProposals = proposals.filter(p => p.id !== currentProposalId);
+        setCurrentProposalId(remainingProposals[0].id);
+        setCurrentProposalData({
+          ...remainingProposals[0],
+          adProductsRecommended: remainingProposals[0].adProductsRecommended || [],
+          targetingTacticsApplied: remainingProposals[0].targetingTacticsApplied || [],
+          suggestedAdProducts: remainingProposals[0].suggestedAdProducts || [],
+          suggestedTargetingTactics: remainingProposals[0].suggestedTargetingTactics || [],
+          goal: remainingProposals[0].goal || '',
+          clientBriefingAsk: remainingProposals[0].clientBriefingAsk || '',
+          createdAt: remainingProposals[0].createdAt || new Date().getTime(),
+        });
+      } else {
+        // If no other proposals, create a new blank one
+        setCurrentProposalId(null); // Clear current ID before creating new
+        setCurrentProposalData({ // Reset to default
+          clientName: 'Client Proposal Hub',
+          presenterName: 'Presented by [Your Name/Company Name]',
+          clientLogoUrl: 'https://placehold.co/120x120/1DB954/ffffff?text=Proposal',
+          mediaPlanLink: '',
+          presentationLink: '',
+          additionalLinks: '',
+          adProductsRecommended: [],
+          targetingTacticsApplied: [],
+          suggestedAdProducts: [],
+          suggestedTargetingTactics: [],
+          goal: '',
+          clientBriefingAsk: '',
+          proposalDescription: '',
+          generatedInsights: [],
+          generatedNextSteps: [],
+          generatedTitleSlogan: { title: '', slogan: '' },
+          draftedClientEmail: '',
+          createdAt: null,
+        });
+        createNewProposal(); // This will set the new currentProposalId and Data
+      }
+    } catch (error) {
+      console.error("Error deleting proposal:", error);
+      setLlmError("Failed to delete proposal.");
+    } finally {
+      setIsLoadingLLM(false);
+      setShowDeleteConfirmModal(false);
+    }
+  };
+
+  const handleSaveLinks = () => {
+    // All changes to currentProposalData are already handled by the useEffect debounce
+    // This function primarily closes the modal.
+    setShowInputModal(false);
+  };
+
+  // Handlers for checkbox changes
+  const handleAdProductChange = (product) => {
+    setCurrentProposalData(prev => {
+      const updatedProducts = prev.adProductsRecommended.includes(product)
+        ? prev.adProductsRecommended.filter(p => p !== product)
+        : [...prev.adProductsRecommended, product];
+      return { ...prev, adProductsRecommended: updatedProducts };
+    });
+  };
+
+  const handleTargetingTacticChange = (tactic) => {
+    setCurrentProposalData(prev => {
+      const updatedTactics = prev.targetingTacticsApplied.includes(tactic)
+        ? prev.targetingTacticsApplied.filter(t => t !== tactic)
+        : [...prev.targetingTacticsApplied, tactic];
+      return { ...prev, targetingTacticsApplied: updatedTactics };
+    });
+  };
+
+  // --- Sharing Functionality ---
+  const handleShareProposal = () => {
+    if (currentProposalId) {
+      let shareUrl = `${window.location.origin}${window.location.pathname}?proposalId=${currentProposalId}`;
+
+      // Check if running in a blob URL (Canvas preview environment)
+      if (window.location.protocol === 'blob:') {
+        // Provide a generic message for preview, or instruct on deployment
+        setShareMessage('Link copied! This link works when the app is deployed to a public URL. In preview, it might not be shareable externally.');
+      } else {
+        setShareMessage('Link copied to clipboard!');
+      }
+
+      // Use document.execCommand('copy') as a fallback for clipboard access in iframes
+      const textarea = document.createElement('textarea');
+      textarea.value = shareUrl;
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        // Message already set above
+      } catch (err) {
+        console.error('Failed to copy text: ', err);
+        setShareMessage('Failed to copy link. Please copy manually.');
+      }
+      document.body.removeChild(textarea);
+      setTimeout(() => setShareMessage(''), 5000); // Keep message longer for explanation
+    }
+  };
+
+  const handleCopyEmail = () => {
+    if (currentProposalData.draftedClientEmail) {
+      // Use document.execCommand('copy') as a fallback for clipboard access in iframes
+      const textarea = document.createElement('textarea');
+      textarea.value = currentProposalData.draftedClientEmail;
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        setShareMessage('Email content copied to clipboard!');
+      } catch (err) {
+        console.error('Failed to copy email: ', err);
+        setShareMessage('Failed to copy email content. Please copy manually.');
+      }
+      document.body.removeChild(textarea);
+      setTimeout(() => setShareMessage(''), 3000);
+    }
+  };
+
+  // Helper function to render a link card
+  const LinkCard = ({ icon: Icon, title, link, description }) => {
+    if (!link) return null;
+
+    return (
+      <a
+        href={link}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center p-4 bg-gray-800 rounded-lg shadow-md hover:bg-gray-700 transition-colors duration-200 cursor-pointer"
+      >
+        <div className="flex-shrink-0 mr-4">
+          <Icon className="w-8 h-8 text-green-400" />
+        </div>
+        <div className="flex-grow">
+          <h3 className="text-lg font-semibold text-white">{title}</h3>
+          {description && <p className="text-sm text-gray-400 mt-1">{description}</p>}
+          <p className="text-xs text-gray-500 truncate mt-1">{link}</p>
+        </div>
+      </a>
+    );
+  };
+
+  // Generic function to call Gemini API with exponential backoff
+  const callGeminiAPI = async (prompt, responseSchema) => {
+    let chatHistory = [];
+    chatHistory.push({ role: 'user', parts: [{ text: prompt }] });
+
+    const payload = {
+      contents: chatHistory,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: responseSchema,
+      },
+    };
+
+    const apiKey = ''; // Leave as-is, Canvas will provide it
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+    const maxRetries = 5;
+    let retryCount = 0;
+    let success = false;
+    let result = null;
+
+    while (retryCount < maxRetries && !success) {
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        result = await response.json();
+
+        if (
+          result.candidates &&
+          result.candidates.length > 0 &&
+          result.candidates[0].content &&
+          result.candidates[0].content.parts &&
+          result.candidates[0].content.parts.length > 0
+        ) {
+          const json = result.candidates[0].content.parts[0].text;
+          result = JSON.parse(json); // Parse the JSON string from the LLM
+          success = true;
+        } else {
+          throw new Error('Failed to generate content: Unexpected response structure.');
+        }
+      } catch (error) {
+        console.error('Error calling Gemini API:', error);
+        setLlmError(`Failed to generate content: ${error.message}. Retrying...`);
+        retryCount++;
+        await new Promise((resolve) => setTimeout(resolve, Math.pow(2, retryCount) * 1000)); // Exponential backoff
+      }
+    }
+
+    if (!success) {
+      throw new Error('Failed to generate content after multiple retries. Please try again.');
+    }
+    return result;
+  };
+
+  // Function to call Gemini API for generating insights and next steps
+  const handleGenerateInsightsAndSteps = async () => {
+    setIsLoadingLLM(true);
+    setLlmError('');
+
+    if (!currentProposalData.proposalDescription.trim()) {
+      setLlmError('Please provide a description of your proposal to generate insights.');
+      setIsLoadingLLM(false);
+      return;
+    }
+
+    const prompt = `Generate key insights and next steps for a media proposal based on the following description. Provide the output as a JSON object with two arrays: "keyInsights" and "nextSteps".\n\nProposal Description: ${currentProposalData.proposalDescription}`;
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        keyInsights: { type: 'ARRAY', items: { type: 'STRING' } },
+        nextSteps: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      propertyOrdering: ['keyInsights', 'nextSteps'],
+    };
+
+    try {
+      const data = await callGeminiAPI(prompt, schema);
+      setCurrentProposalData(prev => ({
+        ...prev,
+        generatedInsights: data.keyInsights || [],
+        generatedNextSteps: data.nextSteps || [],
+      }));
+      setShowLLMModal(false); // Close modal on success
+    } catch (error) {
+      setLlmError(error.message);
+    } finally {
+      setIsLoadingLLM(false);
+    }
+  };
+
+  // Function to call Gemini API for generating title and slogan
+  const handleGenerateTitleSlogan = async () => {
+    setIsLoadingLLM(true);
+    setLlmError('');
+
+    if (!currentProposalData.proposalDescription.trim()) {
+      setLlmError('Please provide a description of your proposal to generate a title and slogan.');
+      setIsLoadingLLM(false);
+      return;
+    }
+
+    const prompt = `Generate a catchy and professional title and a short slogan for a media proposal based on the following description. Provide the output as a JSON object with two fields: "title" and "slogan".\n\nProposal Description: ${currentProposalData.proposalDescription}`;
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING' },
+        slogan: { type: 'STRING' },
+      },
+      propertyOrdering: ['title', 'slogan'],
+    };
+
+    try {
+      const data = await callGeminiAPI(prompt, schema);
+      setCurrentProposalData(prev => ({
+        ...prev,
+        generatedTitleSlogan: {
+          title: data.title || 'Generated Title',
+          slogan: data.slogan || 'Generated Slogan',
+        },
+      }));
+      setShowLLMModal(false); // Close modal on success
+    } catch (error) {
+      setLlmError(error.message);
+    } finally {
+      setIsLoadingLLM(false);
+    }
+  };
+
+  // Function to call Gemini API for drafting client email
+  const handleDraftClientEmail = async () => {
+    setIsLoadingLLM(true);
+    setLlmError('');
+
+    if (!currentProposalData.proposalDescription.trim()) {
+      setLlmError('Please provide a description of your proposal to draft an email.');
+      setIsLoadingLLM(false);
+      return;
+    }
+
+    const insightsText = currentProposalData.generatedInsights.length > 0 ? `Include these key insights: ${currentProposalData.generatedInsights.join(', ')}.` : '';
+    const prompt = `Draft a concise and professional client introduction email for a media proposal. Include a brief overview of the proposal and a call to action to review the linked documents. ${insightsText} Keep it under 150 words. Provide the output as a JSON object with one field: "emailBody".\n\nProposal Description: ${currentProposalData.proposalDescription}`;
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        emailBody: { type: 'STRING' },
+      },
+      propertyOrdering: ['emailBody'],
+    };
+
+    try {
+      const data = await callGeminiAPI(prompt, schema);
+      setCurrentProposalData(prev => ({
+        ...prev,
+        draftedClientEmail: data.emailBody || 'Could not draft email.',
+      }));
+      setShowLLMModal(false); // Close modal on success
+    } catch (error) {
+      setLlmError(error.message);
+    } finally {
+      setIsLoadingLLM(false);
+    }
+  };
+
+  // Function to call Gemini API for suggesting ad products and targeting tactics
+  const handleSuggestProductsAndTactics = async () => {
+    setIsLoadingLLM(true);
+    setLlmError('');
+    setCurrentProposalData(prev => ({
+        ...prev,
+        suggestedAdProducts: [],
+        suggestedTargetingTactics: [],
+    })); // Clear previous suggestions
+
+    const goal = currentProposalData.goal.trim();
+    const briefingAsk = currentProposalData.clientBriefingAsk.trim();
+    const proposalDesc = currentProposalData.proposalDescription.trim();
+
+    if (!goal && !briefingAsk && !proposalDesc) {
+      setLlmError('Please provide a Goal, Client Briefing Ask, or Proposal Description to get suggestions.');
+      setIsLoadingLLM(false);
+      return;
+    }
+
+    let prompt = `Based on the following information, suggest up to 5 relevant ad products and up to 5 relevant targeting tactics from the provided lists. Prioritize the most impactful and common options. If no relevant options are found, return empty arrays.`;
+
+    if (goal) prompt += `\n\nClient Goal: ${goal}`;
+    if (briefingAsk) prompt += `\n\nClient Briefing Ask: ${briefingAsk}`;
+    if (proposalDesc) prompt += `\n\nGeneral Proposal Description: ${proposalDesc}`;
+
+    prompt += `\n\nAvailable Ad Products: ${AD_PRODUCTS_OPTIONS.join(', ')}
+    Available Targeting Tactics: ${TARGETING_TACTICS_OPTIONS.join(', ')}
+
+    Provide the output as a JSON object with two arrays: "suggestedAdProducts" and "suggestedTargetingTactics".`;
+
+    const schema = {
+      type: 'OBJECT',
+      properties: {
+        suggestedAdProducts: { type: 'ARRAY', items: { type: 'STRING' } },
+        suggestedTargetingTactics: { type: 'ARRAY', items: { type: 'STRING' } },
+      },
+      propertyOrdering: ['suggestedAdProducts', 'suggestedTargetingTactics'],
+    };
+
+    try {
+      const data = await callGeminiAPI(prompt, schema);
+      setCurrentProposalData(prev => ({
+        ...prev,
+        suggestedAdProducts: data.suggestedAdProducts || [],
+        suggestedTargetingTactics: data.suggestedTargetingTactics || [],
+      }));
+      setShowLLMModal(false); // Close modal on success
+    } catch (error) {
+      setLlmError(error.message);
+    } finally {
+      setIsLoadingLLM(false);
+    }
+  };
+
+
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-400 mx-auto mb-4"></div>
+          <p>Loading application...</p>
+          {llmError && <p className="text-red-400 mt-2">{llmError}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-black text-white font-inter">
+      {/* Tailwind CSS CDN script for styling */}
+      <script src="https://cdn.tailwindcss.com"></script>
+      {/* Inter font from Google Fonts */}
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+
+      {/* Profile Header Section */}
+      <header className="relative p-6 pb-20 bg-gradient-to-b from-green-900 to-black rounded-b-3xl">
+        <div className="flex items-center justify-between">
+          <button className="text-gray-300 hover:text-white">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+            </svg>
+          </button>
+          <h1 className="text-xl font-bold text-white">Proposal Hub</h1>
+          <button className="text-gray-300 hover:text-white">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex flex-col items-center mt-8">
+          <img
+            src={currentProposalData.clientLogoUrl} // Use dynamic logo URL
+            alt="Client Logo"
+            className="w-32 h-32 rounded-full border-4 border-gray-700 shadow-lg object-cover" // Added object-cover for better image fitting
+          />
+          <h2 className="text-3xl font-bold mt-4">{currentProposalData.clientName}</h2>
+          <p className="text-gray-400 text-sm mt-1">{currentProposalData.presenterName}</p>
+          <div className="flex flex-wrap justify-center gap-4 mt-6">
+            <button
+              onClick={() => setShowInputModal(true)}
+              className="px-6 py-2 bg-green-500 text-black font-semibold rounded-full shadow-lg hover:bg-green-600 transition-colors duration-200 flex items-center"
+            >
+              <PlusCircle className="w-5 h-5 mr-2" /> Add/Edit Links & Info
+            </button>
+            <button
+              onClick={() => setShowLLMModal(true)}
+              className="px-6 py-2 bg-purple-600 text-white font-semibold rounded-full shadow-lg hover:bg-purple-700 transition-colors duration-200 flex items-center"
+            >
+              <Sparkles className="w-5 h-5 mr-2" /> AI Tools
+            </button>
+          </div>
+          {shareMessage && (
+            <p className="text-green-400 text-sm mt-4 animate-pulse">{shareMessage}</p>
+          )}
+        </div>
+      </header>
+
+      {/* Proposal Selection and Management */}
+      <section className="p-6 bg-gray-900 rounded-lg shadow-md mx-6 -mt-10 relative z-20">
+        <h3 className="text-xl font-bold mb-4 text-white">Your Proposals</h3>
+        <div className="flex flex-col gap-2 mb-4"> {/* Changed to flex-col for vertical list */}
+          <button
+            onClick={createNewProposal}
+            className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-md shadow-md hover:bg-blue-700 transition-colors duration-200 flex items-center justify-center text-sm"
+          >
+            <PlusCircle className="w-4 h-4 mr-2" /> New Proposal
+          </button>
+          {proposals.map((proposal) => (
+            <div
+              key={proposal.id}
+              onClick={() => selectProposal(proposal.id)}
+              className={`flex items-center justify-between p-3 rounded-md shadow-sm transition-colors duration-200 cursor-pointer ${
+                currentProposalId === proposal.id
+                  ? 'bg-green-500 text-black font-bold'
+                  : 'bg-gray-700 text-white hover:bg-gray-600'
+              }`}
+            >
+              <span className="truncate">{proposal.clientName || `Proposal ${proposal.id.substring(0, 4)}...`}</span>
+              {currentProposalId === proposal.id && (
+                <div className="flex items-center space-x-2 ml-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleShareProposal(); }} // Stop propagation to prevent selecting proposal
+                    className="p-1 rounded-full text-black hover:bg-green-600 transition-colors duration-200"
+                    title="Share Current Proposal"
+                  >
+                    <Share2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleDeleteProposal(); }} // Stop propagation
+                    className="p-1 rounded-full text-red-700 hover:bg-red-200 transition-colors duration-200"
+                    title="Delete Current Proposal"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+
+      {/* Content Sections */}
+      <main className="p-6 relative z-10">
+        {/* LLM Generated Title & Slogan Section */}
+        {currentProposalData.generatedTitleSlogan.title && (
+          <section className="mb-8 p-6 bg-gray-800 rounded-lg shadow-md text-center">
+            <h3 className="text-xl font-bold text-white mb-2">✨ {currentProposalData.generatedTitleSlogan.title}</h3>
+            <p className="text-gray-300 text-md italic">"{currentProposalData.generatedTitleSlogan.slogan}"</p>
+          </section>
+        )}
+
+        {/* Client Brief Section */}
+        {(currentProposalData.goal || currentProposalData.clientBriefingAsk) && (
+          <section className="mb-8">
+            <h3 className="text-xl font-bold mb-4 text-white flex items-center">
+              <Briefcase className="w-6 h-6 mr-2 text-blue-400" /> Client Brief
+            </h3>
+            <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+              {currentProposalData.goal && (
+                <div className="mb-4">
+                  <h4 className="text-lg font-semibold text-white mb-2">Goal:</h4>
+                  <p className="text-gray-300">{currentProposalData.goal}</p>
+                </div>
+              )}
+              {currentProposalData.clientBriefingAsk && (
+                <div>
+                  <h4 className="text-lg font-semibold text-white mb-2">Client Briefing Ask:</h4>
+                  <p className="text-gray-300 whitespace-pre-wrap">{currentProposalData.clientBriefingAsk}</p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Ad Products Recommended Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white flex items-center">
+            <ShoppingBag className="w-6 h-6 mr-2 text-green-400" /> Ad Products Recommended
+          </h3>
+          <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+            {currentProposalData.adProductsRecommended.length > 0 ? (
+              <ul className="list-disc list-inside text-gray-300 space-y-1">
+                {currentProposalData.adProductsRecommended.map((product, index) => (
+                  <li key={index}>{product}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-gray-400 text-center py-4">No ad products selected yet.</p>
+            )}
+          </div>
+        </section>
+
+        {/* Targeting Tactics Applied Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white flex items-center">
+            <Target className="w-6 h-6 mr-2 text-green-400" /> Targeting Tactics Applied
+          </h3>
+          <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+            {currentProposalData.targetingTacticsApplied.length > 0 ? (
+              <ul className="list-disc list-inside text-gray-300 space-y-1">
+                {currentProposalData.targetingTacticsApplied.map((tactic, index) => (
+                  <li key={index}>{tactic}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-gray-400 text-center py-4">No targeting tactics selected yet.</p>
+            )}
+          </div>
+        </section>
+
+        {/* AI Suggested Products & Tactics Section */}
+        {(currentProposalData.suggestedAdProducts.length > 0 || currentProposalData.suggestedTargetingTactics.length > 0) && (
+            <section className="mb-8">
+                <h3 className="text-xl font-bold mb-4 text-white flex items-center">
+                    <Lightbulb className="w-6 h-6 mr-2 text-yellow-400" /> ✨ AI Suggested Strategy
+                </h3>
+                <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+                    {currentProposalData.suggestedAdProducts.length > 0 && (
+                        <div className="mb-4">
+                            <h4 className="text-lg font-semibold text-white mb-2">Suggested Ad Products:</h4>
+                            <ul className="list-disc list-inside text-gray-300 space-y-1">
+                                {currentProposalData.suggestedAdProducts.map((product, index) => (
+                                    <li key={index}>{product}</li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    {currentProposalData.suggestedTargetingTactics.length > 0 && (
+                        <div>
+                            <h4 className="text-lg font-semibold text-white mb-2">Suggested Targeting Tactics:</h4>
+                            <ul className="list-disc list-inside text-gray-300 space-y-1">
+                                {currentProposalData.suggestedTargetingTactics.map((tactic, index) => (
+                                    <li key={index}>{tactic}</li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+            </section>
+        )}
+
+        {/* Media Plan Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white">Media Plan</h3>
+          <div className="grid gap-4">
+            {currentProposalData.mediaPlanLink ? (
+              <LinkCard
+                icon={FileText}
+                title="Google Sheets Media Plan"
+                link={currentProposalData.mediaPlanLink}
+                description="Detailed media strategy and budget breakdown."
+              />
+            ) : (
+              <p className="text-gray-400 text-center py-4">No media plan link added yet.</p>
+            )}
+          </div>
+        </section>
+
+        {/* Presentation Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white">Presentation</h3>
+          <div className="grid gap-4">
+            {currentProposalData.presentationLink ? (
+              <LinkCard
+                icon={Presentation}
+                title="Google Slides Presentation"
+                link={currentProposalData.presentationLink}
+                description="Key insights, strategy overview, and creative concepts."
+              />
+            ) : (
+              <p className="text-gray-400 text-center py-4">No presentation link added yet.</p>
+            )}
+          </div>
+        </section>
+
+        {/* Additional Links Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white">Additional Resources</h3>
+          <div className="grid gap-4">
+            {currentProposalData.additionalLinks.split('\n').filter(link => link.trim() !== '').length > 0 ? (
+              currentProposalData.additionalLinks.split('\n').filter(link => link.trim() !== '').map((link, index) => (
+                <LinkCard
+                  key={index}
+                  icon={Link}
+                  title={`Additional Link ${index + 1}`}
+                  link={link.trim()}
+                  description={`Supporting document or relevant resource.`}
+                />
+              ))
+            ) : (
+              <p className="text-gray-400 text-center py-4">No additional links added yet.</p>
+            )}
+          </div>
+        </section>
+
+        {/* LLM Generated Content Section */}
+        <section className="mb-8">
+          <h3 className="text-xl font-bold mb-4 text-white">✨ Key Insights & Next Steps</h3>
+          <div className="bg-gray-800 p-6 rounded-lg shadow-md">
+            {isLoadingLLM && (
+              <div className="text-center text-green-400">
+                <p>Generating insights... Please wait.</p>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-400 mx-auto mt-4"></div>
+              </div>
+            )}
+            {llmError && <p className="text-red-400 text-center py-4">{llmError}</p>}
+            {!isLoadingLLM && !llmError && (currentProposalData.generatedInsights.length > 0 || currentProposalData.generatedNextSteps.length > 0) ? (
+              <>
+                {currentProposalData.generatedInsights.length > 0 && (
+                  <div className="mb-4">
+                    <h4 className="text-lg font-semibold text-white mb-2">Key Insights:</h4>
+                    <ul className="list-disc list-inside text-gray-300 space-y-1">
+                      {currentProposalData.generatedInsights.map((insight, index) => (
+                        <li key={index}>{insight}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {currentProposalData.generatedNextSteps.length > 0 && (
+                  <div>
+                    <h4 className="text-lg font-semibold text-white mb-2">Next Steps:</h4>
+                    <ul className="list-disc list-inside text-gray-300 space-y-1">
+                      {currentProposalData.generatedNextSteps.map((step, index) => (
+                        <li key={index}>{step}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : (
+              !isLoadingLLM && !llmError && <p className="text-gray-400 text-center py-4">No AI-generated insights yet. Click "✨ AI Tools" to get started!</p>
+            )}
+          </div>
+        </section>
+
+        {/* LLM Drafted Email Section */}
+        {currentProposalData.draftedClientEmail && (
+          <section className="mb-8">
+            <h3 className="text-xl font-bold mb-4 text-white">✨ Drafted Client Email</h3>
+            <div className="bg-gray-800 p-6 rounded-lg shadow-md relative">
+              <p className="text-gray-300 whitespace-pre-wrap">{currentProposalData.draftedClientEmail}</p>
+              <button
+                onClick={handleCopyEmail}
+                className="absolute top-3 right-3 p-2 bg-gray-700 rounded-full text-white hover:bg-gray-600 transition-colors duration-200"
+                title="Copy Email Content"
+              >
+                <Copy className="w-5 h-5" />
+              </button>
+            </div>
+          </section>
+        )}
+      </main>
+
+      {/* Input Modal for Links and Info */}
+      {showInputModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50"
+             onClick={() => setShowInputModal(false)}> {/* Click backdrop to close */}
+          <div className="bg-gray-900 p-6 rounded-xl shadow-2xl w-full max-w-md"
+               onClick={(e) => e.stopPropagation()}> {/* Prevent clicks inside from closing */}
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-white">Edit Proposal Links & Info</h2>
+              <button onClick={() => setShowInputModal(false)} className="text-gray-400 hover:text-white">
+                <XCircle className="w-7 h-7" />
+              </button>
+            </div>
+
+            <div className="space-y-4 overflow-y-auto max-h-[80vh] pr-2"> {/* Added overflow-y-auto and max-h for scroll */}
+              {/* Editable Client Name */}
+              <div>
+                <label htmlFor="clientName" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Client / Proposal Name
+                </label>
+                <input
+                  type="text"
+                  id="clientName"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., Acme Corp Media Proposal"
+                  value={currentProposalData.clientName}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, clientName: e.target.value }))}
+                />
+              </div>
+
+              {/* Editable Presenter Name */}
+              <div>
+                <label htmlFor="presenterName" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Presented By
+                </label>
+                <input
+                  type="text"
+                  id="presenterName"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., Your Name / Company Name"
+                  value={currentProposalData.presenterName}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, presenterName: e.target.value }))}
+                />
+              </div>
+
+              {/* Editable Client Logo URL */}
+              <div>
+                <label htmlFor="clientLogoUrl" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Client Logo URL
+                </label>
+                <input
+                  type="url"
+                  id="clientLogoUrl"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., https://example.com/client-logo.png"
+                  value={currentProposalData.clientLogoUrl}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, clientLogoUrl: e.target.value }))}
+                />
+              </div>
+
+              {/* Client Briefing Inputs */}
+              <div>
+                <label htmlFor="goal" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Goal (e.g., Increase brand awareness, drive sales)
+                </label>
+                <input
+                  type="text"
+                  id="goal"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., Drive 15% increase in online conversions"
+                  value={currentProposalData.goal}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, goal: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label htmlFor="clientBriefingAsk" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Client Briefing Ask (Detailed request)
+                </label>
+                <textarea
+                  id="clientBriefingAsk"
+                  rows="5"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., Client is launching a new product line and needs a media plan to reach young adults (18-34) in urban areas, with a focus on video content and social engagement."
+                  value={currentProposalData.clientBriefingAsk}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, clientBriefingAsk: e.target.value }))}
+                ></textarea>
+              </div>
+
+              {/* Ad Products Recommended Checkboxes */}
+              <div>
+                <label className="block text-gray-300 text-sm font-semibold mb-2">
+                  Ad Products Recommended
+                </label>
+                <div className="grid grid-cols-2 gap-2 text-gray-300">
+                  {AD_PRODUCTS_OPTIONS.map(product => (
+                    <div key={product} className="flex items-center">
+                      <input
+                        type="checkbox"
+                        id={`product-${product}`}
+                        checked={currentProposalData.adProductsRecommended.includes(product)}
+                        onChange={() => handleAdProductChange(product)}
+                        className="form-checkbox h-4 w-4 text-green-500 rounded border-gray-600 focus:ring-green-500 bg-gray-700"
+                      />
+                      <label htmlFor={`product-${product}`} className="ml-2 text-sm">
+                        {product}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Targeting Tactics Applied Checkboxes */}
+              <div>
+                <label className="block text-gray-300 text-sm font-semibold mb-2">
+                  Targeting Tactics Applied
+                </label>
+                <div className="grid grid-cols-2 gap-2 text-gray-300">
+                  {TARGETING_TACTICS_OPTIONS.map(tactic => (
+                    <div key={tactic} className="flex items-center">
+                      <input
+                        type="checkbox"
+                        id={`tactic-${tactic}`}
+                        checked={currentProposalData.targetingTacticsApplied.includes(tactic)}
+                        onChange={() => handleTargetingTacticChange(tactic)}
+                        className="form-checkbox h-4 w-4 text-green-500 rounded border-gray-600 focus:ring-green-500 bg-gray-700"
+                      />
+                      <label htmlFor={`tactic-${tactic}`} className="ml-2 text-sm">
+                        {tactic}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Existing Link Inputs */}
+              <div>
+                <label htmlFor="mediaPlan" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Google Sheets Media Plan URL
+                </label>
+                <input
+                  type="url"
+                  id="mediaPlan"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., https://docs.google.com/spreadsheets/d/..."
+                  value={currentProposalData.mediaPlanLink}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, mediaPlanLink: e.target.value }))}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="presentation" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Google Slides Presentation URL
+                </label>
+                <input
+                  type="url"
+                  id="presentation"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g., https://docs.google.com/presentation/d/..."
+                  value={currentProposalData.presentationLink}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, presentationLink: e.target.value }))}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="additionalLinks" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Additional Links (one per line)
+                </label>
+                <textarea
+                  id="additionalLinks"
+                  rows="5"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="e.g.,
+https://yourwebsite.com/case-study
+https://vimeo.com/your-ad-spot
+https://linkedin.com/your-profile"
+                  value={currentProposalData.additionalLinks}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, additionalLinks: e.target.value }))}
+                ></textarea>
+              </div>
+
+              <button
+                onClick={handleSaveLinks}
+                className="w-full py-3 bg-green-500 text-black font-bold rounded-md shadow-lg hover:bg-green-600 transition-colors duration-200 flex items-center justify-center"
+              >
+                <Save className="w-5 h-5 mr-2" /> Save Links & Info
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LLM Input Modal */}
+      {showLLMModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50"
+             onClick={() => setShowLLMModal(false)}> {/* Click backdrop to close */}
+          <div className="bg-gray-900 p-6 rounded-xl shadow-2xl w-full max-w-md"
+               onClick={(e) => e.stopPropagation()}> {/* Prevent clicks inside from closing */}
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-white">✨ AI Proposal Tools</h2>
+              <button onClick={() => setShowLLMModal(false)} className="text-gray-400 hover:text-white">
+                <XCircle className="w-7 h-7" />
+              </button>
+            </div>
+
+            <div className="space-y-4 overflow-y-auto max-h-[80vh] pr-2"> {/* Added overflow-y-auto and max-h for scroll */}
+              <div>
+                <label htmlFor="proposalDescription" className="block text-gray-300 text-sm font-semibold mb-2">
+                  Briefly describe your media proposal:
+                </label>
+                <textarea
+                  id="proposalDescription"
+                  rows="7"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-md text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  placeholder="e.g., A proposal for a new social media campaign targeting Gen Z for a sustainable fashion brand, focusing on TikTok and Instagram Reels with influencer collaborations and user-generated content."
+                  value={currentProposalData.proposalDescription}
+                  onChange={(e) => setCurrentProposalData(prev => ({ ...prev, proposalDescription: e.target.value }))}
+                ></textarea>
+              </div>
+
+              {llmError && <p className="text-red-400 text-sm">{llmError}</p>}
+
+              <button
+                onClick={handleGenerateInsightsAndSteps}
+                disabled={isLoadingLLM}
+                className={`w-full py-3 ${isLoadingLLM ? 'bg-gray-600 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'} text-white font-bold rounded-md shadow-lg transition-colors duration-200 flex items-center justify-center`}
+              >
+                {isLoadingLLM ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Generating Insights...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-5 h-5 mr-2" /> Generate Insights & Next Steps
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={handleGenerateTitleSlogan}
+                disabled={isLoadingLLM}
+                className={`w-full py-3 ${isLoadingLLM ? 'bg-gray-600 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'} text-white font-bold rounded-md shadow-lg transition-colors duration-200 flex items-center justify-center`}
+              >
+                {isLoadingLLM ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Generating Title...
+                  </>
+                ) : (
+                  <>
+                    <Tag className="w-5 h-5 mr-2" /> Generate Title & Slogan
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={handleDraftClientEmail}
+                disabled={isLoadingLLM}
+                className={`w-full py-3 ${isLoadingLLM ? 'bg-gray-600 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'} text-white font-bold rounded-md shadow-lg transition-colors duration-200 flex items-center justify-center`}
+              >
+                {isLoadingLLM ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Drafting Email...
+                  </>
+                ) : (
+                  <>
+                    <Mail className="w-5 h-5 mr-2" /> Draft Client Email
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={handleSuggestProductsAndTactics}
+                disabled={isLoadingLLM}
+                className={`w-full py-3 ${isLoadingLLM ? 'bg-gray-600 cursor-not-allowed' : 'bg-yellow-600 hover:bg-yellow-700'} text-black font-bold rounded-md shadow-lg transition-colors duration-200 flex items-center justify-center`}
+              >
+                {isLoadingLLM ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-black mr-2"></div>
+                    Suggesting...
+                  </>
+                ) : (
+                  <>
+                    <Lightbulb className="w-5 h-5 mr-2" /> Suggest Products & Tactics
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirmModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50"
+             onClick={() => setShowDeleteConfirmModal(false)}>
+          <div className="bg-gray-900 p-6 rounded-xl shadow-2xl w-full max-w-sm text-center"
+               onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-xl font-bold text-white mb-4">Confirm Deletion</h2>
+            <p className="text-gray-300 mb-6">Are you sure you want to delete this proposal?</p>
+            <div className="flex justify-center space-x-4">
+              <button
+                onClick={confirmDeleteProposal}
+                className="px-6 py-2 bg-red-600 text-white font-semibold rounded-md shadow-lg hover:bg-red-700 transition-colors duration-200"
+                disabled={isLoadingLLM}
+              >
+                {isLoadingLLM ? 'Deleting...' : 'Delete'}
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirmModal(false)}
+                className="px-6 py-2 bg-gray-700 text-white font-semibold rounded-md shadow-lg hover:bg-gray-600 transition-colors duration-200"
+                disabled={isLoadingLLM}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default App;
